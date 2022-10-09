@@ -209,10 +209,10 @@ class BlindHumanoidLocomotionTask(RLTask):
         print("Initial_root_rot: ", self.initial_root_rot)
         self.initial_dof_pos = self._robots.get_joint_positions()
         # [tzm : nn_4] : initial positial (hands down)
-        self.initial_dof_pos = torch.tensor([0., 0., np.pi/4, -np.pi/4, np.pi/4, -np.pi/4, 0., -np.pi/4, -np.pi/4, 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.], device=self._device)
-        self.initial_dof_pos = self.initial_dof_pos[None,:]
-        self.initial_dof_pos = self.initial_dof_pos.repeat(self.num_envs, 1)
-        print("===Shape===: ", self.initial_dof_pos.shape)
+        # self.initial_dof_pos = torch.tensor([0., 0., np.pi/4, -np.pi/4, np.pi/4, -np.pi/4, 0., -np.pi/4, -np.pi/4, 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.], device=self._device)
+        # self.initial_dof_pos = self.initial_dof_pos[None,:]
+        # self.initial_dof_pos = self.initial_dof_pos.repeat(self.num_envs, 1)
+        # print("===Shape===: ", self.initial_dof_pos.shape)
         # [END]
 
         # initialize some data used later on
@@ -225,7 +225,7 @@ class BlindHumanoidLocomotionTask(RLTask):
         self.basis_vec1 = self.up_vec.clone()
 
         self.targets = torch.tensor([11.5, -6.25, 0], dtype=torch.float32, device=self._device).repeat((self.num_envs, 1))
-        self.target_dirs = torch.tensor([1, 0, 0], dtype=torch.float32, device=self._device).repeat((self.num_envs, 1))
+        # self.target_dirs = torch.tensor([1, 0, 0], dtype=torch.float32, device=self._device).repeat((self.num_envs, 1))
         self.dt = 1.0 / 60.0
         self.potentials = torch.tensor([-1000.0 / self.dt], dtype=torch.float32, device=self._device).repeat(self.num_envs)
         self.prev_potentials = self.potentials.clone()
@@ -393,14 +393,9 @@ def calculate_metrics(
     alive_reward = torch.ones_like(potentials) * alive_reward_scale
     # progress_reward = potentials - prev_potentials
     progress_reward = potentials # [TZM: reward displacement]
-    disp_reward = obs_buf[:,1] #[TZM: X axis of local velocity]
-    # print("Rewards: ")
-    # print('--------------------------------')
-    # print(progress_reward)
-    # print('================================')
-    # print(disp_reward)
-    # print('+++++++++++++++++++++++++++++++++')
-    # print(heading_reward)
+    disp_reward = obs_buf[:, 1] #[TZM: X axis of local velocity]
+    # disp_reward = torch.norm(obs_buf[:, 1:3] , p=2, dim=-1) # [sanity_3]
+
     total_reward = (
         progress_reward * 0.0
         + alive_reward
@@ -411,11 +406,24 @@ def calculate_metrics(
         - dof_at_limit_cost
     )
 
+    # print("Rewards: ")
+    # print('================================')
+    # print("Progess: ", progress_reward)
+    # print("up_reward: ", up_reward)
+    # print("disp_reward: ", disp_reward)
+    # print("alive_reward: ", alive_reward)
+    # print("actions_cost (scale): ", actions_cost, actions_cost_scale)
+    # print("electricity_cost (scale): ", electricity_cost, energy_cost_scale)
+    # print("dof_at_limit_cost: ", dof_at_limit_cost)
+    # print('---------------------------------')
+    # print("Total: ", total_reward)
+    # print('================================')
+
     # adjust reward for fallen agents
     total_reward = torch.where(
         obs_buf[:, 0] < termination_height, torch.ones_like(total_reward) * death_cost, total_reward
     )
     total_reward = torch.where(
-        potentials <= 0.25, torch.ones_like(total_reward) * 5000, total_reward
+        potentials <= 0.25, torch.ones_like(total_reward) * 1000, total_reward
     )
     return total_reward

@@ -72,7 +72,7 @@ class BlindHumanoidLocomotionTask(RLTask):
         self.termination_height = self._task_cfg["env"]["terminationHeight"]
         self.alive_reward_scale = self._task_cfg["env"]["alive_reward_scale"]
 
-        self._num_observations = 87
+        self._num_observations = 83 # 87
         self._num_actions = 21
         self._humanoid_positions = torch.tensor([3, 3, 1.34])
 
@@ -267,9 +267,9 @@ class BlindHumanoidLocomotionTask(RLTask):
 @torch.jit.script
 def get_dof_at_limit_cost(obs_buf, motor_effort_ratio, joints_at_limit_cost_scale):
     # type: (Tensor, Tensor, float) -> Tensor
-    scaled_cost = joints_at_limit_cost_scale * (torch.abs(obs_buf[:, 12:33]) - 0.98) / 0.02
+    scaled_cost = joints_at_limit_cost_scale * (torch.abs(obs_buf[:, 8:29]) - 0.98) / 0.02
     dof_at_limit_cost = torch.sum(
-        (torch.abs(obs_buf[:, 12:33]) > 0.98) * scaled_cost * motor_effort_ratio.unsqueeze(0), dim=-1
+        (torch.abs(obs_buf[:, 8:29]) > 0.98) * scaled_cost * motor_effort_ratio.unsqueeze(0), dim=-1
     )
     return dof_at_limit_cost
 
@@ -320,21 +320,20 @@ def get_observations(
 
     dof_pos_scaled = unscale(dof_pos, dof_limits_lower, dof_limits_upper)
 
-    # obs_buf shapes: 1, 3, 3, 1, 1, 1, 1, 1, num_dofs, num_dofs, num_sensors * 6, num_dofs
     obs = torch.cat(
         (
-            torso_position[:, 2].view(-1, 1),
-            vel_loc,
-            angvel_loc * angular_velocity_scale,
-            normalize_angle(yaw).unsqueeze(-1),
-            normalize_angle(roll).unsqueeze(-1),
-            normalize_angle(angle_to_target).unsqueeze(-1),
-            up_proj.unsqueeze(-1),
-            heading_proj.unsqueeze(-1),
-            dof_pos_scaled,
-            dof_vel * dof_vel_scale,
-            sensor_force_torques.reshape(num_envs, -1) * contact_force_scale,
-            actions,
+            torso_position[:, 2].view(-1, 1),                       # shape: 1
+            vel_loc,                                                # shape: 3
+            angvel_loc * angular_velocity_scale,                    # shape: 3
+            # normalize_angle(yaw).unsqueeze(-1),                     # shape: 1
+            # normalize_angle(roll).unsqueeze(-1),                    # shape: 1
+            # normalize_angle(angle_to_target).unsqueeze(-1),         # shape: 1
+            up_proj.unsqueeze(-1),                                  # shape: 1
+            # heading_proj.unsqueeze(-1),                             # shape: 1
+            dof_pos_scaled,                                         # shape: num_dof
+            dof_vel * dof_vel_scale,                                # shape: num_dof
+            sensor_force_torques.reshape(num_envs, -1) * contact_force_scale,   # shape: num_sensors * 6
+            actions,                                                # shape: num_dof
         ),
         dim=-1,
     )
@@ -375,19 +374,19 @@ def calculate_metrics(
 ):
     # type: (Tensor, Tensor, float, float, Tensor, Tensor, float, float, float, float, int, Tensor, float, Tensor) -> Tensor
 
-    heading_weight_tensor = torch.ones_like(obs_buf[:, 11]) * heading_weight
-    heading_reward = torch.where(
-        obs_buf[:, 11] > 0.8, heading_weight_tensor, heading_weight * obs_buf[:, 11] / 0.8
-    )
+    # heading_weight_tensor = torch.ones_like(obs_buf[:, 11]) * heading_weight
+    # heading_reward = torch.where(
+    #     obs_buf[:, 11] > 0.8, heading_weight_tensor, heading_weight * obs_buf[:, 11] / 0.8
+    # )
 
     # aligning up axis of robot and environment
-    up_reward = torch.zeros_like(heading_reward)
-    up_reward = torch.where(obs_buf[:, 10] > 0.93, up_reward + up_weight, up_reward)
+    up_reward = torch.zeros_like(obs_buf[:, 7])
+    up_reward = torch.where(obs_buf[:, 7] > 0.93, up_reward + up_weight, up_reward)
 
     # energy penalty for movement
     actions_cost = torch.sum(actions ** 2, dim=-1)
     # action(force) * velocity * effort_ratio ~= power
-    electricity_cost = torch.sum(torch.abs(actions * obs_buf[:, 12+num_dof:12+num_dof*2])* motor_effort_ratio.unsqueeze(0), dim=-1)
+    electricity_cost = torch.sum(torch.abs(actions * obs_buf[:, 8+num_dof:8+num_dof*2])* motor_effort_ratio.unsqueeze(0), dim=-1)
 
     # reward for duration of staying alive
     alive_reward = torch.ones_like(potentials) * alive_reward_scale

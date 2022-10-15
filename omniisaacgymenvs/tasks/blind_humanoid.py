@@ -111,10 +111,11 @@ class BlindHumanoidLocomotionTask(RLTask):
         # force sensors attached to the feet
         sensor_force_torques = self._robots._physics_view.get_force_sensor_forces() # (num_envs, num_sensors, 6)
 
-        self.obs_buf[:], self.potentials[:], self.prev_potentials[:], self.up_vec[:], self.heading_vec[:] = get_observations(
+        self.obs_buf[:], self.potentials[:], self.prev_potentials[:], self.up_vec[:], self.heading_vec[:], self.prev_torso_position[:], self.displacement[:] = get_observations(
             torso_position, torso_rotation, velocity, ang_velocity, dof_pos, dof_vel, self.targets, self.potentials, self.dt,
             self.inv_start_rot, self.basis_vec0, self.basis_vec1, self.dof_limits_lower, self.dof_limits_upper, self.dof_vel_scale,
-            sensor_force_torques, self._num_envs, self.contact_force_scale, self.actions, self.angular_velocity_scale
+            sensor_force_torques, self._num_envs, self.contact_force_scale, self.actions, self.angular_velocity_scale,
+            self.prev_torso_position
         )
         observations = {
             self._robots.name: {
@@ -131,6 +132,13 @@ class BlindHumanoidLocomotionTask(RLTask):
 
         self.actions = actions.clone().to(self._device)
         forces = self.actions * self.joint_gears * self.power_scale
+
+        print("&"*20)
+        print("[actinos]:")
+        print(actions)
+        print("[forces]:")
+        print(forces)
+        print("&"*20)
 
         indices = torch.arange(self._robots.count, dtype=torch.int32, device=self._device)
 
@@ -164,6 +172,8 @@ class BlindHumanoidLocomotionTask(RLTask):
         self.prev_potentials[env_ids] = -torch.norm(to_target, p=2, dim=-1) / self.dt
         self.potentials[env_ids] = self.prev_potentials[env_ids].clone()
 
+        self.displacement[env_ids] = torch.zeros((num_resets), device=self._device)
+        self.prev_torso_position[env_ids] = root_pos.clone()
         # bookkeeping
         self.reset_buf[env_ids] = 0
         self.progress_buf[env_ids] = 0
@@ -230,6 +240,8 @@ class BlindHumanoidLocomotionTask(RLTask):
         self.potentials = torch.tensor([-1000.0 / self.dt], dtype=torch.float32, device=self._device).repeat(self.num_envs)
         self.prev_potentials = self.potentials.clone()
 
+        self.displacement = torch.zeros((self.num_envs), device=self._device)
+        self.prev_torso_position = self.initial_root_pos.clone()
         self.actions = torch.zeros((self.num_envs, self.num_actions), device=self._device)
 
         # randomize all envs
@@ -240,7 +252,8 @@ class BlindHumanoidLocomotionTask(RLTask):
         self.rew_buf[:] = calculate_metrics(
             self.obs_buf, self.actions, self.up_weight, self.heading_weight, self.potentials, self.prev_potentials,
             self.actions_cost_scale, self.energy_cost_scale, self.termination_height,
-            self.death_cost, self._robots.num_dof, self.get_dof_at_limit_cost(), self.alive_reward_scale, self.motor_effort_ratio
+            self.death_cost, self._robots.num_dof, self.get_dof_at_limit_cost(), self.alive_reward_scale, self.motor_effort_ratio,
+            self.displacement
         )
 
     def is_done(self) -> None:
@@ -298,9 +311,10 @@ def get_observations(
     num_envs,
     contact_force_scale,
     actions,
-    angular_velocity_scale
+    angular_velocity_scale,
+    prev_torso_position
 ):
-    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, float, Tensor, Tensor, Tensor, Tensor, Tensor, float, Tensor, int, float, Tensor, float) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]
+    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, float, Tensor, Tensor, Tensor, Tensor, Tensor, float, Tensor, int, float, Tensor, float, Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
 
     to_target = targets - torso_position
     to_target[:, 2] = 0.0
@@ -320,6 +334,14 @@ def get_observations(
 
     dof_pos_scaled = unscale(dof_pos, dof_limits_lower, dof_limits_upper)
 
+    print("#########################")
+    print("DOF Position scaled:")
+    print(dof_pos_scaled)
+    print("#########################")
+    displacement = torso_position - prev_torso_position # [in global frame]
+    # displacement = torch.norm(displacement, p=2, dim=-1)
+    displacement = torch.bmm(displacement.view(num_envs, 1, 3), heading_vec.view(num_envs, 3, 1)).view(num_envs)
+
     obs = torch.cat(
         (
             torso_position[:, 2].view(-1, 1),                       # shape: 1
@@ -338,7 +360,7 @@ def get_observations(
         dim=-1,
     )
 
-    return obs, potentials, prev_potentials, up_vec, heading_vec
+    return obs, potentials, prev_potentials, up_vec, heading_vec, torso_position, displacement
 
 @torch.jit.script
 def is_done(
@@ -370,9 +392,10 @@ def calculate_metrics(
     num_dof,
     dof_at_limit_cost,
     alive_reward_scale,
-    motor_effort_ratio
+    motor_effort_ratio,
+    displacement
 ):
-    # type: (Tensor, Tensor, float, float, Tensor, Tensor, float, float, float, float, int, Tensor, float, Tensor) -> Tensor
+    # type: (Tensor, Tensor, float, float, Tensor, Tensor, float, float, float, float, int, Tensor, float, Tensor, Tensor) -> Tensor
 
     # heading_weight_tensor = torch.ones_like(obs_buf[:, 11]) * heading_weight
     # heading_reward = torch.where(
@@ -392,8 +415,9 @@ def calculate_metrics(
     alive_reward = torch.ones_like(potentials) * alive_reward_scale
     # progress_reward = potentials - prev_potentials
     progress_reward = potentials # [TZM: reward displacement]
-    disp_reward = obs_buf[:, 1] #[TZM: X axis of local velocity]
+    # disp_reward = obs_buf[:, 1] #[TZM: X axis of local velocity]
     # disp_reward = torch.norm(obs_buf[:, 1:3] , p=2, dim=-1) # [sanity_3]
+    disp_reward = displacement * 1.0
 
     total_reward = (
         progress_reward * 0.0
@@ -409,13 +433,14 @@ def calculate_metrics(
     # print('================================')
     # print("Progess: ", progress_reward)
     # print("up_reward: ", up_reward)
-    # print("disp_reward: ", disp_reward)
+    print("disp_reward: ", disp_reward)
+    print("obs_buf: ", obs_buf[:,1:4])
     # print("alive_reward: ", alive_reward)
     # print("actions_cost (scale): ", actions_cost, actions_cost_scale)
     # print("electricity_cost (scale): ", electricity_cost, energy_cost_scale)
     # print("dof_at_limit_cost: ", dof_at_limit_cost)
     # print('---------------------------------')
-    # print("Total: ", total_reward)
+    print("Total: ", total_reward)
     # print('================================')
 
     # adjust reward for fallen agents

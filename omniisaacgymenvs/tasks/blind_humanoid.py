@@ -415,9 +415,9 @@ def calculate_metrics(
     alive_reward = torch.ones_like(potentials) * alive_reward_scale
     # progress_reward = potentials - prev_potentials
     progress_reward = potentials # [TZM: reward displacement]
-    # disp_reward = obs_buf[:, 1] #[TZM: X axis of local velocity]
+    disp_reward = obs_buf[:, 1] #[TZM: X axis of local velocity]
     # disp_reward = torch.norm(obs_buf[:, 1:3] , p=2, dim=-1) # [sanity_3]
-    disp_reward = displacement * 1.0
+    # disp_reward = displacement * 1.0
 
     total_reward = (
         progress_reward * 0.0

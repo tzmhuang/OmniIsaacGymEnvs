@@ -67,6 +67,9 @@ class RLGTrainer():
     def run(self):
         # create runner and set the settings
         runner = Runner(RLGPUAlgoObserver())
+        print("COMFIG: ")
+        print(self.rlg_config_dict)
+        print("------------------------------------")
         runner.load(self.rlg_config_dict)
         runner.reset()
 

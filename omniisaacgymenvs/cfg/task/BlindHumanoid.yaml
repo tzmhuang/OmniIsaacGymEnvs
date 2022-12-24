@@ -22,14 +22,14 @@ env:
 
   # cost parameters
   actionsCost: 0.01
-  energyCost: 0.05
+  energyCost: 0.05 #[defaut: 0.05]
   dofVelocityScale: 0.1
   angularVelocityScale: 0.25
   contactForceScale: 0.01
   jointsAtLimitCost: 0.25
   deathCost: -1.0
   terminationHeight: 0.8
-  alive_reward_scale: 2.0
+  alive_reward_scale: 2.0 #[defaut: 2.0]
 
 sim:
   dt: 0.0083 # 1/120 s

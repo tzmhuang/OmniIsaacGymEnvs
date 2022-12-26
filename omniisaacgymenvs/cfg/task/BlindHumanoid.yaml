@@ -7,7 +7,7 @@ physics_engine: ${..physics_engine}
 env: 
 #  numEnvs: ${...num_envs}
   numEnvs: ${resolve_default:4096,${...num_envs}}
-  envSpacing: 30 #5
+  envSpacing: 0 #5
   episodeLength: 2000 #1000
   enableDebugVis: False
 
@@ -29,7 +29,7 @@ env:
   jointsAtLimitCost: 0.25
   deathCost: -1.0
   terminationHeight: 0.8
-  alive_reward_scale: 2.0
+  alive_reward_scale: 2.0 #[default: 2.0]
 
 sim:
   dt: 0.0083 # 1/120 s

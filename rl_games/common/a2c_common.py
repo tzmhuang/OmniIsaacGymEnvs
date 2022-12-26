@@ -1219,8 +1219,12 @@ class ContinuousA2CBase(A2CBase):
 
                     checkpoint_name = self.config['name'] + '_ep_' + str(epoch_num) + '_rew_' + str(mean_rewards[0])
 
+                    # if self.save_freq > 0:
+                    #     if (epoch_num % self.save_freq == 0) and (mean_rewards[0] <= self.last_mean_rewards):
+                    #         self.save(os.path.join(self.nn_dir, 'last_' + checkpoint_name))
+
                     if self.save_freq > 0:
-                        if (epoch_num % self.save_freq == 0) and (mean_rewards[0] <= self.last_mean_rewards):
+                        if (epoch_num % self.save_freq == 0):# and (mean_rewards[0] <= self.last_mean_rewards):
                             self.save(os.path.join(self.nn_dir, 'last_' + checkpoint_name))
 
                     if mean_rewards[0] > self.last_mean_rewards and epoch_num >= self.save_best_after:

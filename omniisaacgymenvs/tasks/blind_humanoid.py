@@ -34,14 +34,24 @@ from omni.isaac.core.utils.torch.rotations import compute_heading_and_up, comput
 from omni.isaac.core.utils.torch.maths import torch_rand_float, tensor_clamp, unscale
 
 from omni.isaac.core.articulations import ArticulationView
+from omni.isaac.core.prims import GeometryPrim, XFormPrimView
 from omni.isaac.core.utils.prims import get_prim_at_path
 
+from omni.isaac.core.utils import prims
+
+import omni.replicator.core as rep
+
+import os
 import numpy as np
 import torch
 import math
 
 from pxr import PhysxSchema
+from PIL import Image
 
+RECORD = False
+# TARGET_POS = [11.5, -6.25, 0]
+TARGET_POS = [-5.0, 6.25, 1.0]
 
 class BlindHumanoidLocomotionTask(RLTask):
     def __init__(
@@ -76,7 +86,11 @@ class BlindHumanoidLocomotionTask(RLTask):
         self._num_actions = 21
         self._humanoid_positions = torch.tensor([3, 3, 1.34])
 
+        self._env = env
+        self._global_step = 0
+
         RLTask.__init__(self, name, env)
+        
         return
 
     def set_up_scene(self, scene) -> None:
@@ -86,6 +100,53 @@ class BlindHumanoidLocomotionTask(RLTask):
         RLTask.set_up_scene(self, scene)
         self._humanoids = ArticulationView(prim_paths_expr="/World/envs/.*/Humanoid/torso", name="humanoid_view", reset_xform_properties=False)
         scene.add(self._humanoids)
+
+        self._target = XFormPrimView(prim_paths_expr="/World/envs/.*/Target", reset_xform_properties=False)
+        scene.add(self._target)
+
+        # add camera for recording (1 camera only)
+        if RECORD:
+            record_camera = prims.create_prim(
+                prim_path="/World/Camera",
+                prim_type="Camera",
+                attributes={
+                    "focusDistance": 1,
+                    "focalLength": 50,
+                    "horizontalAperture": 20.955,
+                    "verticalAperture": 15.2908,
+                    "clippingRange": (0.01, 1000000),
+                    "clippingPlanes": np.array([1.0, 0.0, 1.0, 1.0]),
+                },
+                translation=(0, 0, 65),
+                orientation=[0.7071068 , 0, 0, 0.7071068], # wxyz () facing down
+            )
+            rep_camera = rep.create.camera(record_camera)
+            render_product = rep.create.render_product(record_camera.GetPrimPath(), resolution=(1024, 1024))
+            self.rgb_camera = rep.AnnotatorRegistry.get_annotator("rgb")
+            self.rgb_camera.attach([render_product])
+
+            self.rgb_file_path = "/data/zanming/Omniverse/OmniIsaacGymEnvs/omniisaacgymenvs/runs/{}/rgb_ep679/".format(self._cfg['experiment'])
+            print("RGB_FILE_PATH: ", self.rgb_file_path)
+            if not os.path.exists(self.rgb_file_path):
+                os.makedirs(self.rgb_file_path, exist_ok=True)
+
+        return
+
+
+    # Save rgb image to file
+    def save_rgb(self, rgb_data, file_name):
+        rgb_image_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(*rgb_data.shape, -1)
+        rgb_img = Image.fromarray(rgb_image_data, "RGBA")
+        rgb_img.save(file_name + ".png")
+
+    def get_camera_data(self): 
+        # Generate one frame of data
+        # rep.orchestrator.step()
+        # Get data
+        # rgb = self.rgb_wrist.get_data()
+        # depth = self.depth_wrist.get_data()
+        print(self._global_step)
+        self.save_rgb(self.rgb_camera.get_data(), self.rgb_file_path + "step_%05d"%self._global_step)
         return
 
     def get_humanoid(self):
@@ -96,6 +157,14 @@ class BlindHumanoidLocomotionTask(RLTask):
     def get_room(self):
         room = Room(prim_path=self.default_zero_env_path +"/Room", name='room', translation=(0, 0, 1.5))
         # room = Room(prim_path="/World/Room", name='room', translation=(0, 0, 1.5))
+
+        # create goal
+        target_geom = prims.create_prim(
+                prim_path=self.default_zero_env_path + "/Target",
+                prim_type="Sphere",
+                translation=TARGET_POS,
+        )
+
 
     def get_robot(self):
         return self._humanoids
@@ -112,7 +181,7 @@ class BlindHumanoidLocomotionTask(RLTask):
         sensor_force_torques = self._robots._physics_view.get_force_sensor_forces() # (num_envs, num_sensors, 6)
 
         self.obs_buf[:], self.potentials[:], self.prev_potentials[:], self.up_vec[:], self.heading_vec[:], self.prev_torso_position[:], self.displacement[:] = get_observations(
-            torso_position, torso_rotation, velocity, ang_velocity, dof_pos, dof_vel, self.targets, self.potentials, self.dt,
+            torso_position, torso_rotation, velocity, ang_velocity, dof_pos, dof_vel, self.target_position, self.potentials, self.dt,
             self.inv_start_rot, self.basis_vec0, self.basis_vec1, self.dof_limits_lower, self.dof_limits_upper, self.dof_vel_scale,
             sensor_force_torques, self._num_envs, self.contact_force_scale, self.actions, self.angular_velocity_scale,
             self.prev_torso_position
@@ -133,17 +202,22 @@ class BlindHumanoidLocomotionTask(RLTask):
         self.actions = actions.clone().to(self._device)
         forces = self.actions * self.joint_gears * self.power_scale
 
-        print("&"*20)
-        print("[actinos]:")
-        print(actions)
-        print("[forces]:")
-        print(forces)
-        print("&"*20)
+        # print("&"*20)
+        # print("[actinos]:")
+        # print(actions)
+        # print("[forces]:")
+        # print(forces)
+        # print("&"*20)
 
         indices = torch.arange(self._robots.count, dtype=torch.int32, device=self._device)
 
         # applies joint torques
         self._robots.set_joint_efforts(forces, indices=indices)
+
+        if RECORD and self._global_step % 10 == 0:
+            self.get_camera_data() # save rgb
+
+        self._global_step += 1
 
     def reset_idx(self, env_ids):
         num_resets = len(env_ids)
@@ -167,13 +241,14 @@ class BlindHumanoidLocomotionTask(RLTask):
         self._robots.set_world_poses(root_pos, root_rot, indices=env_ids)
         self._robots.set_velocities(root_vel, indices=env_ids)
 
-        to_target = self.targets[env_ids] - self.initial_root_pos[env_ids]
+        to_target = self.target_position[env_ids] - self.initial_root_pos[env_ids]
         to_target[:, 2] = 0.0
         self.prev_potentials[env_ids] = -torch.norm(to_target, p=2, dim=-1) / self.dt
         self.potentials[env_ids] = self.prev_potentials[env_ids].clone()
 
         self.displacement[env_ids] = torch.zeros((num_resets), device=self._device)
         self.prev_torso_position[env_ids] = root_pos.clone()
+
         # bookkeeping
         self.reset_buf[env_ids] = 0
         self.progress_buf[env_ids] = 0
@@ -216,7 +291,7 @@ class BlindHumanoidLocomotionTask(RLTask):
 
         self._robots = self.get_robot()
         self.initial_root_pos, self.initial_root_rot = self._robots.get_world_poses()
-        print("Initial_root_rot: ", self.initial_root_rot)
+        # print("Initial_root_rot: ", self.initial_root_rot)
         self.initial_dof_pos = self._robots.get_joint_positions()
         # [tzm : nn_4] : initial positial (hands down)
         # self.initial_dof_pos = torch.tensor([0., 0., np.pi/4, -np.pi/4, np.pi/4, -np.pi/4, 0., -np.pi/4, -np.pi/4, 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.], device=self._device)
@@ -224,6 +299,8 @@ class BlindHumanoidLocomotionTask(RLTask):
         # self.initial_dof_pos = self.initial_dof_pos.repeat(self.num_envs, 1)
         # print("===Shape===: ", self.initial_dof_pos.shape)
         # [END]
+
+        self.target_position, self.target_rotation = self._target.get_world_poses()
 
         # initialize some data used later on
         self.start_rotation = torch.tensor([1, 0, 0, 0], device=self._device, dtype=torch.float32)
@@ -234,7 +311,7 @@ class BlindHumanoidLocomotionTask(RLTask):
         self.basis_vec0 = self.heading_vec.clone()
         self.basis_vec1 = self.up_vec.clone()
 
-        self.targets = torch.tensor([11.5, -6.25, 0], dtype=torch.float32, device=self._device).repeat((self.num_envs, 1))
+        # self.targets = torch.tensor(TARGET_POS, dtype=torch.float32, device=self._device).repeat((self.num_envs, 1))
         # self.target_dirs = torch.tensor([1, 0, 0], dtype=torch.float32, device=self._device).repeat((self.num_envs, 1))
         self.dt = 1.0 / 60.0
         self.potentials = torch.tensor([-1000.0 / self.dt], dtype=torch.float32, device=self._device).repeat(self.num_envs)
@@ -334,10 +411,10 @@ def get_observations(
 
     dof_pos_scaled = unscale(dof_pos, dof_limits_lower, dof_limits_upper)
 
-    print("#########################")
-    print("DOF Position scaled:")
-    print(dof_pos_scaled)
-    print("#########################")
+    # print("#########################")
+    # print("DOF Position scaled:")
+    # print(dof_pos_scaled)
+    # print("#########################")
     displacement = torso_position - prev_torso_position # [in global frame]
     # displacement = torch.norm(displacement, p=2, dim=-1)
     displacement = torch.bmm(displacement.view(num_envs, 1, 3), heading_vec.view(num_envs, 3, 1)).view(num_envs)
@@ -353,9 +430,9 @@ def get_observations(
             up_proj.unsqueeze(-1),                                  # shape: 1
             # heading_proj.unsqueeze(-1),                             # shape: 1
             dof_pos_scaled,                                         # shape: num_dof
-            dof_vel * dof_vel_scale,                                # shape: num_dof
-            sensor_force_torques.reshape(num_envs, -1) * contact_force_scale,   # shape: num_sensors * 6
-            actions,                                                # shape: num_dof
+            dof_vel * dof_vel_scale,                                # shape: num_dof                        [nan]
+            sensor_force_torques.reshape(num_envs, -1) * contact_force_scale,   # shape: num_sensors * 6    [nan]
+            actions,                                                # shape: num_dof    [good]
         ),
         dim=-1,
     )
@@ -374,7 +451,7 @@ def is_done(
     # type: (Tensor, float, Tensor, Tensor, float, Tensor) -> Tensor
     reset = torch.where(obs_buf[:, 0] < termination_height, torch.ones_like(reset_buf), reset_buf)
     reset = torch.where(progress_buf >= max_episode_length - 1, torch.ones_like(reset_buf), reset)
-    reset = torch.where(dist_to_goal <= 0.25,  torch.ones_like(reset_buf), reset)
+    reset = torch.where(dist_to_goal <= 1.0,  torch.ones_like(reset_buf), reset)
     return reset
 
 @torch.jit.script
@@ -415,11 +492,12 @@ def calculate_metrics(
     alive_reward = torch.ones_like(potentials) * alive_reward_scale
     # progress_reward = potentials - prev_potentials
     progress_reward = potentials # [TZM: reward displacement]
-    # disp_reward = obs_buf[:, 1] #[TZM: X axis of local velocity]
+    disp_reward = obs_buf[:, 1] #[TZM: X axis of local velocity]
     # disp_reward = torch.norm(obs_buf[:, 1:3] , p=2, dim=-1) # [sanity_3]
-    disp_reward = displacement * 1.0
+    # disp_reward = displacement * 1.0
 
     total_reward = (
+        # 0.0,
         progress_reward * 0.0
         + alive_reward
         + up_reward
@@ -433,14 +511,14 @@ def calculate_metrics(
     # print('================================')
     # print("Progess: ", progress_reward)
     # print("up_reward: ", up_reward)
-    print("disp_reward: ", disp_reward)
-    print("obs_buf: ", obs_buf[:,1:4])
+    # print("disp_reward: ", disp_reward)
+    # print("obs_buf: ", obs_buf[:,1:4])
     # print("alive_reward: ", alive_reward)
     # print("actions_cost (scale): ", actions_cost, actions_cost_scale)
     # print("electricity_cost (scale): ", electricity_cost, energy_cost_scale)
     # print("dof_at_limit_cost: ", dof_at_limit_cost)
     # print('---------------------------------')
-    print("Total: ", total_reward)
+    # print("Total: ", total_reward)
     # print('================================')
 
     # adjust reward for fallen agents
@@ -448,6 +526,6 @@ def calculate_metrics(
         obs_buf[:, 0] < termination_height, torch.ones_like(total_reward) * death_cost, total_reward
     )
     total_reward = torch.where(
-        potentials <= 0.25, torch.ones_like(total_reward) * 1000, total_reward
+        potentials <= 1.0, torch.ones_like(total_reward) * 1000, total_reward
     )
     return total_reward

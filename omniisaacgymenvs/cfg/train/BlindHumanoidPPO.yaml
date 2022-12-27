@@ -58,7 +58,7 @@ params:
     score_to_win: 20000
     max_epochs: ${resolve_default:1000,${....max_iterations}}
     save_best_after: 100
-    save_frequency: 1 #[default: 100]
+    save_frequency: 5 #[default: 100]
     grad_norm: 1.0
     entropy_coef: 0.0
     truncate_grads: True

@@ -419,6 +419,11 @@ def get_observations(
     # displacement = torch.norm(displacement, p=2, dim=-1)
     displacement = torch.bmm(displacement.view(num_envs, 1, 3), heading_vec.view(num_envs, 3, 1)).view(num_envs)
 
+    # print("#########################")
+    # print("DOF Position scaled:")
+    # print(dof_pos_scaled)
+    # print("#########################")
+    
     obs = torch.cat(
         (
             torso_position[:, 2].view(-1, 1),                       # shape: 1
@@ -433,6 +438,7 @@ def get_observations(
             dof_vel * dof_vel_scale,                                # shape: num_dof                        [nan]
             sensor_force_torques.reshape(num_envs, -1) * contact_force_scale,   # shape: num_sensors * 6    [nan]
             actions,                                                # shape: num_dof    [good]
+            # targets,                                                # shape: 3?
         ),
         dim=-1,
     )
@@ -449,8 +455,9 @@ def is_done(
     dist_to_goal
 ):
     # type: (Tensor, float, Tensor, Tensor, float, Tensor) -> Tensor
-    reset = torch.where(obs_buf[:, 0] < termination_height, torch.ones_like(reset_buf), reset_buf)
-    reset = torch.where(progress_buf >= max_episode_length - 1, torch.ones_like(reset_buf), reset)
+
+    # reset = torch.where(obs_buf[:, 0] < termination_height, torch.ones_like(reset_buf), reset_buf)
+    reset = torch.where(progress_buf >= max_episode_length - 1, torch.ones_like(reset_buf), reset_buf)
     reset = torch.where(dist_to_goal <= 1.0,  torch.ones_like(reset_buf), reset)
     return reset
 
@@ -496,15 +503,21 @@ def calculate_metrics(
     # disp_reward = torch.norm(obs_buf[:, 1:3] , p=2, dim=-1) # [sanity_3]
     # disp_reward = displacement * 1.0
 
+    # total_reward = (
+    #     # 0.0,
+    #     progress_reward * 0.0
+    #     + alive_reward
+    #     + up_reward
+    #     + disp_reward
+    #     - actions_cost_scale * actions_cost
+    #     - energy_cost_scale * electricity_cost
+    #     - dof_at_limit_cost
+    # )
+
     total_reward = (
         # 0.0,
-        progress_reward * 0.0
+        torch.zeros_like(progress_reward)
         + alive_reward
-        + up_reward
-        + disp_reward
-        - actions_cost_scale * actions_cost
-        - energy_cost_scale * electricity_cost
-        - dof_at_limit_cost
     )
 
     # print("Rewards: ")
@@ -522,10 +535,12 @@ def calculate_metrics(
     # print('================================')
 
     # adjust reward for fallen agents
+    # total_reward = torch.where(
+    #     obs_buf[:, 0] < termination_height, torch.ones_like(total_reward) * death_cost, total_reward
+    # )
+
+    #adjust reward for success agents
     total_reward = torch.where(
-        obs_buf[:, 0] < termination_height, torch.ones_like(total_reward) * death_cost, total_reward
-    )
-    total_reward = torch.where(
-        potentials <= 1.0, torch.ones_like(total_reward) * 1000, total_reward
+        potentials <= 1.0, torch.ones_like(total_reward) * 0.0, total_reward
     )
     return total_reward

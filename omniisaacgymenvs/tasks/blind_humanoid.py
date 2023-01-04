@@ -82,7 +82,7 @@ class BlindHumanoidLocomotionTask(RLTask):
         self.termination_height = self._task_cfg["env"]["terminationHeight"]
         self.alive_reward_scale = self._task_cfg["env"]["alive_reward_scale"]
 
-        self._num_observations = 87 # 87
+        self._num_observations = 90 # 87
         self._num_actions = 21
         self._humanoid_positions = torch.tensor([3, 3, 1.34])
 
@@ -416,14 +416,15 @@ def get_observations(
     # print(dof_pos_scaled)
     # print("#########################")
     displacement = torso_position - prev_torso_position # [in global frame]
-    # displacement = torch.norm(displacement, p=2, dim=-1)
-    displacement = torch.bmm(displacement.view(num_envs, 1, 3), heading_vec.view(num_envs, 3, 1)).view(num_envs)
+    displacement = torch.norm(displacement, p=2, dim=-1)
+    # displacement = torch.bmm(displacement.view(num_envs, 1, 3), heading_vec.view(num_envs, 3, 1)).view(num_envs)
 
     # print("#########################")
     # print("DOF Position scaled:")
     # print(vel_loc.shape)
     # print(targets.shape)
     # print(targets.reshape(num_envs, -1).shape)
+    # print(heading_vec.shape)
     # print("#########################")
 
     obs = torch.cat(
@@ -442,6 +443,7 @@ def get_observations(
             actions,                                                # shape: num_dof    [good]
             targets[:, :2],                                         # shape: 2
             torso_position[:, :2],                                  # shape: 2
+            heading_vec,                                            # shape: 3
         ),
         dim=-1,
     )

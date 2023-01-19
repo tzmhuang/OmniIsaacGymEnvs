@@ -40,9 +40,11 @@ from omegaconf import DictConfig
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.logger import configure
-from stable_baselines3.common.vec_env import VecMonitorGPU
-
+# from stable_baselines3.common.vec_env import VecMonitorGPU
+from stable_baselines3.common.vec_env import VecMonitor, VecNormalize
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.results_plotter import load_results, ts2xy
+from stable_baselines3.common.utils import safe_mean
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type, Union
 
@@ -52,6 +54,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type, U
 import datetime
 import os
 import torch
+import numpy as np
 
 # class AdaptiveScheduler(RLScheduler):
 #     def __init__(self, kl_threshold = 0.008):
@@ -147,15 +150,79 @@ class CallbackHyperparamsSchedulePPO(BaseCallback):
     #     self.model._setup_lr_schedule()
 
     def _on_rollout_end(self) -> None:
+        # schedule lr
         kl_dist = self.model.approx_kl
         if kl_dist is not None:
             lr = current_lr = self.model.learning_rate
             if kl_dist > (2.0 * self._kl_threshold):
+                print("up")
                 lr = max(current_lr / 1.5, self._min_lr)
             if kl_dist < (0.5 * self._kl_threshold):
                 lr = min(current_lr * 1.5, self._max_lr)
             self.model.learning_rate = lr
             self.model._setup_lr_schedule()
+        # with torch.no_grad():
+        #     self.model.policy.log_std.fill_(float(-10))
+
+
+class SaveBestModel(BaseCallback):
+    def __init__(self, log_dir, verbose=1):
+        super().__init__()
+
+        self.log_dir = log_dir
+        self.save_path = os.path.join(self.log_dir, "best_model")
+        self.best_rew = -np.inf
+        self.verbose = verbose
+
+        self.n_calls_rollout = 0
+
+    def _init_callback(self) -> None:
+        # Create folder if needed
+        if self.save_path is not None:
+            os.makedirs(self.save_path, exist_ok=True)
+
+    def _on_step(self):
+        return True
+    
+    def _on_rollout_end(self):
+        # save best model
+        self.n_calls_rollout += 1
+
+        # Retrieve training reward
+        if len(self.model.ep_info_buffer) > 0 and len(self.model.ep_info_buffer[0]) > 0:
+            rew = safe_mean([ep_info["r"] for ep_info in self.model.ep_info_buffer])
+
+            if rew > self.best_rew:
+                self.best_rew = rew
+
+                if self.verbose >= 1:
+                    print(f"Saving new best model to {self.save_path}")
+
+                model_path = os.path.join(self.save_path, "model")                
+                self.model.save(model_path)
+                if isinstance(self.model.env, VecNormalize):
+                    env_path = os.path.join(self.save_path, "vec_normalize.pkl")  
+                    self.model.env.save(env_path)
+
+
+class DefaultRewardsShaper:
+    def __init__(self, scale_value = 1, shift_value = 0, min_val=-np.inf, max_val=np.inf, is_torch=False):
+        self.scale_value = scale_value
+        self.shift_value = shift_value
+        self.min_val = min_val
+        self.max_val = max_val
+        self.is_torch = is_torch
+
+    def __call__(self, reward):
+        
+        reward = reward + self.shift_value
+        reward = reward * self.scale_value
+ 
+        if self.is_torch:
+            reward = torch.clamp(reward, self.min_val, self.max_val)
+        else:
+            reward = np.clip(reward, self.min_val, self.max_val)
+        return reward
 
 @hydra.main(config_name="config", config_path="../cfg")
 def parse_hydra_configs(cfg: DictConfig):
@@ -198,18 +265,27 @@ def parse_hydra_configs(cfg: DictConfig):
         )
 
 
+    train_cfg = cfg_dict.get("train", dict())["params"]
+    task_cfg = cfg_dict.get("task", dict())
+
+    reward_shaper = DefaultRewardsShaper(**train_cfg["config"]["reward_shaper"])
+
     # wrap VecEnvBase (IsaacSim) to VecEnvWrapper (SB3)
-    env_wrapped = VecMonitorGPU(VecAdapter(env), device=cfg.rl_device)
-    logger_path = "./tmp/sb3_log/"
+    # env_wrapped = VecMonitorGPU(VecAdapter(env), device=cfg.rl_device)
+    env_wrapped = VecMonitor(VecAdapter(env, reward_shaper=reward_shaper))
+    # logger_path = "./logs/sb3_log_vfclip_wcoef_reward_shapping/"
+    logger_path = "./logs/" + train_cfg["config"]["name"]
 
     if not cfg.test: # train
-        train_cfg = cfg_dict.get("train", dict())["params"]
-        task_cfg = cfg_dict.get("task", dict())
+
+        env_wrapped = VecNormalize(env_wrapped, training=True, clip_obs=10, norm_reward=False)
 
         activation_dict = {"elu": torch.nn.ELU, "relu": torch.nn.ReLU}
         activation_fn = activation_dict[train_cfg["network"]["mlp"]["activation"]]
         policy_kwargs = dict(activation_fn=activation_fn,
-                            net_arch=train_cfg["network"]["mlp"]["units"],)
+                            net_arch=train_cfg["network"]["mlp"]["units"],
+                            log_std_init=0.0,
+                            )
 
 
         model = PPO(
@@ -223,30 +299,45 @@ def parse_hydra_configs(cfg: DictConfig):
                 gae_lambda=train_cfg["config"]["tau"],
                 vf_coef=train_cfg["config"]["critic_coef"]/2,
                 max_grad_norm=train_cfg["config"]["grad_norm"],
+                clip_range_vf=train_cfg["config"]["e_clip"], # value error clip
+                ent_coef=0.01, # entropy coefficient
                 policy_kwargs=policy_kwargs,
                 verbose=1,
                 seed=cfg.seed,
                 device=cfg.rl_device,
             )
 
+
+        # bound loss 
+
+        # model.policy.log_std.requires_grad_(False)
+
         # set up logger
         new_logger = configure(logger_path)
         model.set_logger(new_logger)
         # horizon_length or episodeLength
         total_timesteps = env_wrapped.num_envs * train_cfg["config"]["horizon_length"] * train_cfg["config"]["max_epochs"]
-        learning_rate_callback = CallbackHyperparamsSchedulePPO()
-        model.learn(total_timesteps=total_timesteps, progress_bar=True, callback=learning_rate_callback)
+        
+        callback = [CallbackHyperparamsSchedulePPO(), SaveBestModel(logger_path)]
+        model.learn(total_timesteps=total_timesteps, progress_bar=False, callback=callback)
 
-        model.save(logger_path + "sb3_test_model")
+        model.save(logger_path + "/sb3_test_model")
+        if isinstance(env_wrapped, VecNormalize):
+            env_wrapped.save(logger_path + "/vec_normalize.pkl")
 
     else: # test
-        model = PPO.load(cfg.checkpoint)
+        from pathlib import Path
+        ckpt_path = Path(cfg.checkpoint)
+        env_wrapped = VecNormalize.load(ckpt_path.parent/"vec_normalize.pkl", env_wrapped)
+        env_wrapped.training=False
+        env_wrapped.norm_reward=False
+
+        model = PPO.load(ckpt_path)
         # env_wrapped._world.reset()
         obs = env_wrapped.reset()
-        while env._simulation_app.is_running():
+        while env_wrapped._simulation_app.is_running():
             action, _states = model.predict(obs)
-            obs, rewards, dones, info = env.step(action)
-            obs = obs.cpu().numpy()
+            obs, rewards, dones, info = env_wrapped.step(action)
 
     env_wrapped.close()
 

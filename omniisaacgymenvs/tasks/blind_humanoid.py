@@ -461,8 +461,8 @@ def is_done(
 ):
     # type: (Tensor, float, Tensor, Tensor, float, Tensor) -> Tensor
 
-    # reset = torch.where(obs_buf[:, 0] < termination_height, torch.ones_like(reset_buf), reset_buf)
-    reset = torch.where(progress_buf >= max_episode_length - 1, torch.ones_like(reset_buf), reset_buf)
+    reset = torch.where(obs_buf[:, 0] < termination_height, torch.ones_like(reset_buf), reset_buf)
+    reset = torch.where(progress_buf >= max_episode_length - 1, torch.ones_like(reset_buf), reset)
     reset = torch.where(dist_to_goal <= 1.0,  torch.ones_like(reset_buf), reset)
     return reset
 
@@ -540,12 +540,12 @@ def calculate_metrics(
     # print('================================')
 
     # adjust reward for fallen agents
-    # total_reward = torch.where(
-    #     obs_buf[:, 0] < termination_height, torch.ones_like(total_reward) * death_cost, total_reward
-    # )
+    total_reward = torch.where(
+        obs_buf[:, 0] < termination_height, torch.ones_like(total_reward) * death_cost, total_reward
+    )
 
     #adjust reward for success agents
     total_reward = torch.where(
-        potentials <= 1.0, torch.ones_like(total_reward) * 0.0, total_reward
+        potentials <= 1.0, torch.ones_like(total_reward) * 10, total_reward
     )
     return total_reward

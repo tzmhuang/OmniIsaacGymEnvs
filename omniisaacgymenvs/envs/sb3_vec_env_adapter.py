@@ -23,23 +23,25 @@ class VecAdapter(VecEnvWrapper):
     :param venv: The VecEnvBase object.
     """
 
-    def __init__(self, venv: VecEnvBase):
+    def __init__(self, venv: VecEnvBase, reward_shaper=None):
         # Retrieve the number of environments from the config
         super().__init__(venv=venv)
+        self.reward_shaper=reward_shaper # reward shapped in policy_algorithm class
 
     def step_async(self, actions: th.Tensor) -> None:
         self.actions = actions
 
     def reset(self) -> VecEnvObs:
         obs = self.venv.reset()
-        # return obs.cpu().numpy() # convert to numpy array for SB3
-        return obs
+        return obs.cpu().numpy() # convert to numpy array for SB3
+        # return obs
 
     def step_wait(self) -> VecEnvStepReturn:
 
         obs, rewards, resets, info_dict = self.venv.step(self.actions)
         # terminal ovservation
         #   -TODO
+
 
         # Convert extra (dict of arrays) to extra (list of dicts)
 
@@ -59,5 +61,5 @@ class VecAdapter(VecEnvWrapper):
             #     obs[i] = self.venv.reset(np.array([i]))[0]
 
         # convert to numpy array for SB3
-        # return obs.cpu().numpy(), rewards.cpu().numpy(), resets.cpu().numpy(), infos
-        return obs, rewards, resets, infos
+        return obs.cpu().numpy(), rewards.cpu().numpy(), resets.cpu().numpy(), infos
+        # return obs, rewards, resets, infos

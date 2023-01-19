@@ -16,7 +16,7 @@ params:
         sigma_activation: None
 
         mu_init:
-          name: default
+          name: orthogonal_initializer
         sigma_init:
           name: const_initializer
           val: 0
@@ -27,7 +27,7 @@ params:
       d2rl: False
       
       initializer:
-        name: default
+        name: orthogonal_initializer
       regularizer:
         name: None
 
@@ -44,8 +44,8 @@ params:
     ppo: True
     mixed_precision: True
     normalize_input: True
-    normalize_value: True
-    value_bootstrap: True
+    normalize_value: False
+    value_bootstrap: False
     num_actors: ${....task.env.numEnvs}
     reward_shaper:
       scale_value: 0.01

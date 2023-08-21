@@ -63,3 +63,7 @@ hydra:
   run:
     dir: .
 
+# spacing of envs
+env_spacing: ''
+
+experiment_id: 0

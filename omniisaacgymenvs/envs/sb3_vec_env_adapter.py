@@ -46,7 +46,7 @@ class VecAdapter(VecEnvWrapper):
         # Convert extra (dict of arrays) to extra (list of dicts)
 
         infos = []
-        # Convert dict to list of dict
+        # Convert dict of array to list of dict
         # and add terminal observation
         for i in range(self.num_envs):
             infos.append(
@@ -56,10 +56,10 @@ class VecAdapter(VecEnvWrapper):
                     if isinstance(info_dict[key], th.Tensor)
                 }
             )
-            # if dones[i]:
-            #     infos[i]["terminal_observation"] = obs[i]
+            if resets[i]:
+                infos[i]["terminal_observation"] = obs[i].cpu().numpy()
             #     obs[i] = self.venv.reset(np.array([i]))[0]
 
         # convert to numpy array for SB3
-        return obs.cpu().numpy(), rewards.cpu().numpy(), resets.cpu().numpy(), infos
+        return obs.cpu().numpy(), rewards.cpu().numpy(), resets.cpu().numpy().astype(np.bool), infos
         # return obs, rewards, resets, infos

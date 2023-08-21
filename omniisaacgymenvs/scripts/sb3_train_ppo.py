@@ -36,7 +36,7 @@ from omniisaacgymenvs.envs.vec_env_sb3 import VecEnvSB3
 from omniisaacgymenvs.envs.sb3_vec_env_adapter import VecAdapter
 
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.logger import configure
@@ -132,12 +132,14 @@ class CallbackAdaptiveSchedulePPO(BaseCallback):
 class CallbackHyperparamsSchedulePPO(BaseCallback):
     """Learning rate = Initial learning rate * training/std"""
     
-    def __init__(self):
+    def __init__(self, active = True):
         super().__init__()
         self._learning_rate_start = None
         self._kl_threshold = 0.008
         self._min_lr = 1e-6
         self._max_lr = 1e-2
+
+        self._active = active
 
     def _on_step(self):
         return True
@@ -150,15 +152,17 @@ class CallbackHyperparamsSchedulePPO(BaseCallback):
     #     self.model._setup_lr_schedule()
 
     def _on_rollout_end(self) -> None:
+        if not self._active:
+            return
         # schedule lr
         kl_dist = self.model.approx_kl
         if kl_dist is not None:
             lr = current_lr = self.model.learning_rate
             if kl_dist > (2.0 * self._kl_threshold):
                 print("up")
-                lr = max(current_lr / 1.5, self._min_lr)
+                lr = max(current_lr / 1.15, self._min_lr)
             if kl_dist < (0.5 * self._kl_threshold):
-                lr = min(current_lr * 1.5, self._max_lr)
+                lr = min(current_lr * 1.0, self._max_lr)
             self.model.learning_rate = lr
             self.model._setup_lr_schedule()
         # with torch.no_grad():
@@ -202,6 +206,48 @@ class SaveBestModel(BaseCallback):
                 self.model.save(model_path)
                 if isinstance(self.model.env, VecNormalize):
                     env_path = os.path.join(self.save_path, "vec_normalize.pkl")  
+                    self.model.env.save(env_path)
+
+
+class SaveIntermediateModel(BaseCallback):
+    def __init__(self, log_dir, verbose=1, save_freq=200):
+        super().__init__()
+
+        self.log_dir = log_dir
+        self.save_path = os.path.join(self.log_dir, "ckpt_model")
+        # self.best_rew = -np.inf
+        self.verbose = verbose
+        self.save_freq = save_freq
+
+        self.n_calls_rollout = 0
+
+    def _init_callback(self) -> None:
+        # Create folder if needed
+        if self.save_path is not None:
+            os.makedirs(self.save_path, exist_ok=True)
+
+    def _on_step(self):
+        return True
+    
+    def _on_rollout_end(self):
+        self.n_calls_rollout += 1
+
+        if len(self.model.ep_info_buffer) > 0 and len(self.model.ep_info_buffer[0]) > 0:
+
+            if self.n_calls_rollout%self.save_freq == 0:# or self.n_calls_rollout in range(475, 485):   # NOTE: debug only
+
+                if self.verbose >= 1:
+                    print(f"Saving new best model to {self.save_path}")
+
+                model_path = os.path.join(self.save_path, "iter_{}".format(self.n_calls_rollout))
+                if model_path is not None:
+                    os.makedirs(model_path, exist_ok=True)
+
+                ckpt_path = os.path.join(model_path, "model")
+                self.model.save(ckpt_path)
+
+                if isinstance(self.model.env, VecNormalize):
+                    env_path = os.path.join(model_path, "vec_normalize.pkl")  
                     self.model.env.save(env_path)
 
 
@@ -278,12 +324,23 @@ def parse_hydra_configs(cfg: DictConfig):
 
     if not cfg.test: # train
 
-        env_wrapped = VecNormalize(env_wrapped, training=True, clip_obs=10, norm_reward=False)
+        from pathlib import Path
+        
+        if cfg.checkpoint:
+            ckpt_path = Path(cfg.checkpoint)
+
+            try:
+                env_wrapped = VecNormalize.load(ckpt_path.parent/"vec_normalize.pkl", env_wrapped)
+            except FileNotFoundError:
+                env_wrapped = VecNormalize(env_wrapped, training=True, clip_obs=10, norm_reward=False)
+        else:
+            env_wrapped = VecNormalize(env_wrapped, training=True, clip_obs=10, norm_reward=False)
+
 
         activation_dict = {"elu": torch.nn.ELU, "relu": torch.nn.ReLU}
         activation_fn = activation_dict[train_cfg["network"]["mlp"]["activation"]]
         policy_kwargs = dict(activation_fn=activation_fn,
-                            net_arch=train_cfg["network"]["mlp"]["units"],
+                            net_arch=OmegaConf.to_container(train_cfg["network"]["mlp"]["units"]),
                             log_std_init=0.0,
                             )
 
@@ -297,38 +354,62 @@ def parse_hydra_configs(cfg: DictConfig):
                 n_epochs=train_cfg["config"]["mini_epochs"],
                 gamma=train_cfg["config"]["gamma"],
                 gae_lambda=train_cfg["config"]["tau"],
-                vf_coef=train_cfg["config"]["critic_coef"]/2,
+                vf_coef=train_cfg["config"]["critic_coef"] * 0.5,
                 max_grad_norm=train_cfg["config"]["grad_norm"],
                 clip_range_vf=train_cfg["config"]["e_clip"], # value error clip
-                ent_coef=0.01, # entropy coefficient
+                ent_coef=train_cfg["config"]["entropy_coef"], # entropy coefficient
                 policy_kwargs=policy_kwargs,
                 verbose=1,
                 seed=cfg.seed,
                 device=cfg.rl_device,
             )
 
+        if cfg.checkpoint:
+            # param = model.get_parameters()
 
-        # bound loss 
+            model = PPO.load(ckpt_path)
+            # model.set_parameters(param)
+            # print(model.seed)
+            model.ent_coef = train_cfg["config"]["entropy_coef"]
+            model.set_env(env_wrapped)
+            model.set_random_seed(cfg.seed)
+
+
+        # bound loss [deactivated]
 
         # model.policy.log_std.requires_grad_(False)
 
         # set up logger
         new_logger = configure(logger_path)
         model.set_logger(new_logger)
+        
         # horizon_length or episodeLength
         total_timesteps = env_wrapped.num_envs * train_cfg["config"]["horizon_length"] * train_cfg["config"]["max_epochs"]
+
+        if train_cfg["config"]["lr_schedule"] == "adaptive":
+            use_adaptive = True
+        elif train_cfg["config"]["lr_schedule"] == "fixed":
+            use_adaptive = False
+        else:
+            raise ValueError("Unrecognized lr_schedule strategy {}".format(train_cfg["config"]["lr_schedule"]))
         
-        callback = [CallbackHyperparamsSchedulePPO(), SaveBestModel(logger_path)]
+        callback = [CallbackHyperparamsSchedulePPO(use_adaptive), SaveBestModel(logger_path), SaveIntermediateModel(logger_path, save_freq=200)]
         model.learn(total_timesteps=total_timesteps, progress_bar=False, callback=callback)
 
-        model.save(logger_path + "/sb3_test_model")
+        model.save(logger_path + "/final_model")
         if isinstance(env_wrapped, VecNormalize):
             env_wrapped.save(logger_path + "/vec_normalize.pkl")
 
     else: # test
         from pathlib import Path
         ckpt_path = Path(cfg.checkpoint)
-        env_wrapped = VecNormalize.load(ckpt_path.parent/"vec_normalize.pkl", env_wrapped)
+
+        try:
+            env_wrapped = VecNormalize.load(ckpt_path.parent/"vec_normalize.pkl", env_wrapped)
+        except FileNotFoundError:
+            env_wrapped = VecNormalize(env_wrapped, training=True, clip_obs=10, norm_reward=False)
+
+
         env_wrapped.training=False
         env_wrapped.norm_reward=False
 

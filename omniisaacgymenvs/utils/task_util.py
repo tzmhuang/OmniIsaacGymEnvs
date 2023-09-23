@@ -47,6 +47,11 @@ def initialize_task(config, env, init_sim=True):
     from omniisaacgymenvs.tasks.blind_humanoid import BlindHumanoidLocomotionTask
     from omniisaacgymenvs.tasks.blind_humanoid_simple import BlindHumanoidSimpleLocomotionTask
     from omniisaacgymenvs.tasks.blind_humanoid_simple_hist import BlindHumanoidSimpleHistLocomotionTask
+    from omniisaacgymenvs.tasks.blind_humanoid_recurrent import BlindHumanoidRecurrentLocomotionTask
+    from omniisaacgymenvs.tasks.blind_humanoid_recurrent_nm import BlindHumanoidRecurrentLocomotionTask_nm
+    from omniisaacgymenvs.tasks.blind_humanoid_recurrent_newobs import BlindHumanoidRecurrentLocomotionTask_newobs
+
+
     
     # Mappings from strings to environments
     task_map = {
@@ -68,6 +73,9 @@ def initialize_task(config, env, init_sim=True):
         "BlindHumanoid": BlindHumanoidLocomotionTask,
         "BlindHumanoidSimple": BlindHumanoidSimpleLocomotionTask,
         "BlindHumanoidSimpleHist": BlindHumanoidSimpleHistLocomotionTask,
+        "BlindHumanoidRecurrent": BlindHumanoidRecurrentLocomotionTask,
+        "BlindHumanoidRecurrent_nm": BlindHumanoidRecurrentLocomotionTask_nm,
+        "BlindHumanoidRecurrent_newobs": BlindHumanoidRecurrentLocomotionTask_newobs
     }
 
     cfg = sim_config.config

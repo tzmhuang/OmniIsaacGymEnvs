@@ -41,10 +41,11 @@ from omegaconf import DictConfig, OmegaConf
 from stable_baselines3 import PPO
 from stable_baselines3.common.logger import configure
 # from stable_baselines3.common.vec_env import VecMonitorGPU
-from stable_baselines3.common.vec_env import VecMonitor, VecNormalize
+from stable_baselines3.common.vec_env import VecMonitor, VecNormalize, VecCheckNan
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.results_plotter import load_results, ts2xy
 from stable_baselines3.common.utils import safe_mean
+from stable_baselines3.common.save_util import load_from_pkl, save_to_pkl
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type, Union
 
@@ -55,6 +56,7 @@ import datetime
 import os
 import torch
 import numpy as np
+import json
 
 # class AdaptiveScheduler(RLScheduler):
 #     def __init__(self, kl_threshold = 0.008):
@@ -208,6 +210,12 @@ class SaveBestModel(BaseCallback):
                     env_path = os.path.join(self.save_path, "vec_normalize.pkl")  
                     self.model.env.save(env_path)
 
+                if hasattr(self.model, "replay_buffer") and self.model.replay_buffer is not None:
+                    replay_buffer_path = os.path.join(model_path, "replay_buffer.pkl") 
+                    save_to_pkl(replay_buffer_path, self.model.replay_buffer, False) 
+                    if self.verbose > 1:
+                        print(f"Saving model replay buffer checkpoint to {replay_buffer_path}")
+
 
 class SaveIntermediateModel(BaseCallback):
     def __init__(self, log_dir, verbose=1, save_freq=200):
@@ -234,7 +242,7 @@ class SaveIntermediateModel(BaseCallback):
 
         if len(self.model.ep_info_buffer) > 0 and len(self.model.ep_info_buffer[0]) > 0:
 
-            if self.n_calls_rollout%self.save_freq == 0:# or self.n_calls_rollout in range(475, 485):   # NOTE: debug only
+            if self.n_calls_rollout%self.save_freq == 0:# or self.n_calls_rollout in range(2190, 2200):   # NOTE: debug only
 
                 if self.verbose >= 1:
                     print(f"Saving new best model to {self.save_path}")
@@ -249,6 +257,14 @@ class SaveIntermediateModel(BaseCallback):
                 if isinstance(self.model.env, VecNormalize):
                     env_path = os.path.join(model_path, "vec_normalize.pkl")  
                     self.model.env.save(env_path)
+                    if self.verbose >= 2:
+                        print(f"Saving model VecNormalize to {vec_normalize_path}")
+
+                if hasattr(self.model, "replay_buffer") and self.model.replay_buffer is not None:
+                    replay_buffer_path = os.path.join(model_path, "replay_buffer.pkl") 
+                    save_to_pkl(replay_buffer_path, self.model.replay_buffer, False) 
+                    if self.verbose > 1:
+                        print(f"Saving model replay buffer checkpoint to {replay_buffer_path}")
 
 
 class DefaultRewardsShaper:
@@ -292,6 +308,11 @@ def parse_hydra_configs(cfg: DictConfig):
     # sets seed. if seed is -1 will pick a random one
     from omni.isaac.core.utils.torch.maths import set_seed
     cfg.seed = set_seed(cfg.seed, torch_deterministic=cfg.torch_deterministic)
+    print('-'*20)
+    print('SEED Settings:')
+    print('seed: ', cfg.seed)
+    print('deterministic: ', cfg.torch_deterministic)
+    print('-'*20)
 
     if cfg.wandb_activate:
         # Make sure to install WandB if you actually use this.
@@ -314,13 +335,23 @@ def parse_hydra_configs(cfg: DictConfig):
     train_cfg = cfg_dict.get("train", dict())["params"]
     task_cfg = cfg_dict.get("task", dict())
 
+    print(task_cfg)
+
     reward_shaper = DefaultRewardsShaper(**train_cfg["config"]["reward_shaper"])
 
     # wrap VecEnvBase (IsaacSim) to VecEnvWrapper (SB3)
     # env_wrapped = VecMonitorGPU(VecAdapter(env), device=cfg.rl_device)
-    env_wrapped = VecMonitor(VecAdapter(env, reward_shaper=reward_shaper))
+    # env_wrapped = VecMonitor(VecAdapter(env, reward_shaper=reward_shaper))
+
+    env_wrapped = VecCheckNan(VecMonitor(VecAdapter(env, reward_shaper=reward_shaper)), raise_exception=True) # NOTE: added
     # logger_path = "./logs/sb3_log_vfclip_wcoef_reward_shapping/"
     logger_path = "./logs/" + train_cfg["config"]["name"]
+
+    # log config
+    if not os.path.exists(logger_path):
+        os.makedirs(logger_path)
+    cfg_log_path = logger_path + "/config_log.yaml"
+    OmegaConf.save(cfg, cfg_log_path)
 
     if not cfg.test: # train
 
@@ -332,9 +363,10 @@ def parse_hydra_configs(cfg: DictConfig):
             try:
                 env_wrapped = VecNormalize.load(ckpt_path.parent/"vec_normalize.pkl", env_wrapped)
             except FileNotFoundError:
-                env_wrapped = VecNormalize(env_wrapped, training=True, clip_obs=10, norm_reward=False)
+                print('VecEnv Not Found, Creating from scratch')
+                env_wrapped = VecNormalize(env_wrapped, training=True, clip_obs=10, norm_reward=train_cfg["config"]["norm_reward"])
         else:
-            env_wrapped = VecNormalize(env_wrapped, training=True, clip_obs=10, norm_reward=False)
+            env_wrapped = VecNormalize(env_wrapped, training=True, clip_obs=10, norm_reward=train_cfg["config"]["norm_reward"])
 
 
         activation_dict = {"elu": torch.nn.ELU, "relu": torch.nn.ReLU}
@@ -344,13 +376,14 @@ def parse_hydra_configs(cfg: DictConfig):
                             log_std_init=0.0,
                             )
 
+        mini_batch_size = (train_cfg["config"]["horizon_length"] * env_wrapped.num_envs) // train_cfg["config"]["n_mini_batch"]
 
         model = PPO(
                 policy="MlpPolicy", 
                 env=env_wrapped, 
                 n_steps=train_cfg["config"]["horizon_length"], 
                 learning_rate=train_cfg["config"]["learning_rate"], 
-                batch_size=train_cfg["config"]["minibatch_size"], 
+                batch_size=mini_batch_size, 
                 n_epochs=train_cfg["config"]["mini_epochs"],
                 gamma=train_cfg["config"]["gamma"],
                 gae_lambda=train_cfg["config"]["tau"],
@@ -407,18 +440,43 @@ def parse_hydra_configs(cfg: DictConfig):
         try:
             env_wrapped = VecNormalize.load(ckpt_path.parent/"vec_normalize.pkl", env_wrapped)
         except FileNotFoundError:
-            env_wrapped = VecNormalize(env_wrapped, training=True, clip_obs=10, norm_reward=False)
+            env_wrapped = VecNormalize(env_wrapped, training=True, clip_obs=10, norm_reward=train_cfg["config"]["norm_reward"])
 
 
         env_wrapped.training=False
-        env_wrapped.norm_reward=False
+        env_wrapped.norm_reward=train_cfg["config"]["norm_reward"]
 
         model = PPO.load(ckpt_path)
+        model.set_random_seed(cfg.seed)
         # env_wrapped._world.reset()
         obs = env_wrapped.reset()
+
+
+        logger_path = "./testing_logs/" + train_cfg["config"]["name"]
+        test_logger = configure(logger_path)
+        model.set_logger(test_logger)
+
+        timestep=0
+        model.logger.record('test/max_obs', obs.max())
+        model.logger.record('test/mean_obs', obs.mean())
+        model.logger.record('test/min_obs', obs.min())
+        model.logger.dump(step=timestep)
+
         while env_wrapped._simulation_app.is_running():
             action, _states = model.predict(obs)
-            obs, rewards, dones, info = env_wrapped.step(action)
+            obs, rewards, dones, info = env_wrapped.step(action)        # [num_env, x]
+            timestep += 1
+
+            model.logger.record('test/max_obs', obs.max())
+            model.logger.record('test/mean_obs', obs.mean())
+            model.logger.record('test/min_obs', obs.min())
+            # model.logger.record('test/action', action)
+            model.logger.record('test/max_rewards', rewards.max())
+            model.logger.record('test/mean_rewards', rewards.mean())
+            model.logger.record('test/min_rewards', rewards.min())
+            model.logger.dump(step = timestep)
+        
+
 
     env_wrapped.close()
 

@@ -68,7 +68,9 @@ class VecEnvSB3(VecEnvBase):
         print(f"[{now}] Running RL reset")
 
         self._task.reset()
-        actions = torch.zeros((self.num_envs, self._task.num_actions), device=self._task.device)
+        # NOTE: modify misc dim here
+        misc_dim = 1
+        actions = torch.zeros((self.num_envs, self._task.num_actions+misc_dim), device=self._task.device)
         obs, _, _, _ = self.step(actions)
 
         return obs
